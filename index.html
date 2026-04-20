@@ -1431,7 +1431,7 @@
     { threshold: 0.07 }
   );
   document.querySelectorAll('.reveal').forEach(el => revealObs.observe(el));
-
+ 
   /* ── Active nav ── */
   const secs  = document.querySelectorAll('section[id]');
   const navAs = document.querySelectorAll('.nav-links a');
@@ -1443,26 +1443,10 @@
       a.classList.toggle('active', isActive);
     });
   }, { passive: true });
-
-  /* ── Medium articles via RSS-to-JSON ── */
-  const FALLBACK = [
-    { title: 'RBI IT-Examination Readiness: A Practical Guide and Toolkit',
-      date:  'Apr 2026',
-      url:   'https://medium.com/@vijayanand4/rbi-it-examination-readiness-a-practical-guide-and-toolkit-54d54b7a18b6' },
-    { title: 'Unmasking the Real Client: Why "X-Forwarded-For" is Essential in CDN-Based Environments',
-      date:  'May 2025',
-      url:   'https://medium.com/@vijayanand4/unmasking-the-real-client-why-x-forwarded-for-is-essential-in-cdn-based-environments-e9d477e35d60' },
-    { title: 'Beyond the Base Score: Prioritizing Vulnerabilities with Environmental Context',
-      date:  'Apr 2025',
-      url:   'https://medium.com/@vijayanand4/beyond-the-base-score-prioritizing-vulnerabilities-with-environmental-context-cbf6af03dcf8' },
-    { title: 'Self-Signed Certificates: A Security Perspective',
-      date:  'Apr 2025',
-      url:   'https://medium.com/@vijayanand4/self-signed-certificates-a-security-perspective-10a104212009' },
-    { title: 'Building Resilient Systems — High Availability (HA) Best Practices',
-      date:  'Apr 2025',
-      url:   'https://medium.com/@vijayanand4/building-resilient-systems-high-availability-ha-best-practices-0a7de4a7154c' },
-  ];
-
+ 
+ 
+ 
+  /* ── Render article rows ── */
   function renderArticles(items) {
     const c = document.getElementById('articles-container');
     c.innerHTML = '<div class="articles-wrap">' +
@@ -1478,28 +1462,112 @@
     '</div>';
     document.querySelectorAll('.article-row').forEach((el, idx) => {
       el.style.cssText = 'opacity:0;transform:translateY(12px);transition:opacity .4s ease,transform .4s ease;';
-      setTimeout(() => { el.style.opacity='1'; el.style.transform='none'; }, idx * 80 + 100);
+      setTimeout(() => { el.style.opacity = '1'; el.style.transform = 'none'; }, idx * 80 + 100);
     });
   }
-
+ 
+  /* ── Parse raw RSS XML from https://medium.com/feed/@vijayanand4 ──
+     Medium uses RSS 2.0. Each <item> contains:
+       <title><![CDATA[...]]></title>
+       <link>https://medium.com/...</link>   ← bare text node (NOT an attribute)
+       <guid isPermaLink="false">...</guid>  ← fallback URL
+       <pubDate>...</pubDate>
+     DOMParser correctly parses this; we use getElementsByTagName to
+     reliably reach <link>'s text content across all browsers.
+  ── */
+  function parseRSS(xmlText) {
+    const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
+ 
+    // Bail on malformed XML
+    if (doc.querySelector('parsererror')) throw new Error('XML parse error');
+ 
+    const items = Array.from(doc.getElementsByTagName('item')).slice(0, 5);
+    if (!items.length) throw new Error('No <item> elements found in feed');
+ 
+    return items.map(item => {
+      // Title — DOMParser unwraps CDATA automatically
+      const title = item.getElementsByTagName('title')[0]?.textContent?.trim() || '(untitled)';
+ 
+      // URL — <link> in Medium RSS is a plain text node child
+      // getElementsByTagName gives us the element; textContent gets the URL
+      const linkEl = item.getElementsByTagName('link')[0];
+      let url = linkEl?.textContent?.trim() || '';
+      // Strip any whitespace or newlines Medium may inject around the URL
+      url = url.replace(/\s+/g, '');
+      // Fallback to <guid> if <link> was empty
+      if (!url || !url.startsWith('http')) {
+        url = item.getElementsByTagName('guid')[0]?.textContent?.trim() || '#';
+      }
+ 
+      // Date
+      const pubRaw = item.getElementsByTagName('pubDate')[0]?.textContent?.trim() || '';
+      const d = new Date(pubRaw);
+      const date = isNaN(d.getTime()) ? '' :
+        d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+ 
+      return { title, date, url };
+    });
+  }
+ 
+  /* ── Fetch RSS via CORS proxy, try two proxies in sequence ── */
   async function loadArticles() {
+    const FEED = 'https://medium.com/feed/@vijayanand4';
+ 
+    // allorigins wraps the response: { contents: "<rss>...</rss>" }
+    async function viaAllOrigins() {
+      const res = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(FEED));
+      if (!res.ok) throw new Error('allorigins ' + res.status);
+      const { contents } = await res.json();
+      if (!contents?.includes('<item>') && !contents?.includes('<item '))
+        throw new Error('allorigins returned no RSS items');
+      return parseRSS(contents);
+    }
+ 
+    // corsproxy returns the raw RSS text directly
+    async function viaCorsproxy() {
+      const res = await fetch('https://corsproxy.io/?' + encodeURIComponent(FEED));
+      if (!res.ok) throw new Error('corsproxy ' + res.status);
+      const text = await res.text();
+      if (!text?.includes('<item>') && !text?.includes('<item '))
+        throw new Error('corsproxy returned no RSS items');
+      return parseRSS(text);
+    }
+ 
+    // Static fallback — hardcoded latest 5 articles scraped from medium.com/@vijayanand4
+    const FALLBACK = [
+      { title: 'RBI IT-Examination Readiness: A Practical Guide and Toolkit',
+        date: 'Apr 2026',
+        url: 'https://medium.com/@vijayanand4/rbi-it-examination-readiness-a-practical-guide-and-toolkit-54d54b7a18b6' },
+      { title: 'Unmasking the Real Client: Why "X-Forwarded-For" is Essential in CDN-Based Environments',
+        date: 'May 2025',
+        url: 'https://medium.com/@vijayanand4/unmasking-the-real-client-why-x-forwarded-for-is-essential-in-cdn-based-environments-e9d477e35d60' },
+      { title: 'Beyond the Base Score: Prioritizing Vulnerabilities with Environmental Context',
+        date: 'Apr 2025',
+        url: 'https://medium.com/@vijayanand4/beyond-the-base-score-prioritizing-vulnerabilities-with-environmental-context-cbf6af03dcf8' },
+      { title: 'Self-Signed Certificates: A Security Perspective',
+        date: 'Apr 2025',
+        url: 'https://medium.com/@vijayanand4/self-signed-certificates-a-security-perspective-10a104212009' },
+      { title: 'Building Resilient Systems — High Availability (HA) Best Practices',
+        date: 'Apr 2025',
+        url: 'https://medium.com/@vijayanand4/building-resilient-systems-high-availability-ha-best-practices-0a7de4a7154c' },
+    ];
+ 
     try {
-      const API = 'https://api.rss2json.com/v1/api.json?rss_url=' +
-                  encodeURIComponent('https://medium.com/feed/@vijayanand4') + '&count=5';
-      const res  = await fetch(API);
-      const data = await res.json();
-      if (data.status !== 'ok' || !data.items?.length) throw new Error();
-      renderArticles(data.items.slice(0, 5).map(item => ({
-        title: item.title,
-        date:  new Date(item.pubDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }),
-        url:   item.link,
-      })));
-    } catch {
-      renderArticles(FALLBACK);
+      const items = await viaAllOrigins();
+      renderArticles(items);
+    } catch (e1) {
+      console.warn('[Medium] allorigins failed:', e1.message, '— trying corsproxy…');
+      try {
+        const items = await viaCorsproxy();
+        renderArticles(items);
+      } catch (e2) {
+        console.warn('[Medium] corsproxy failed:', e2.message, '— using static fallback.');
+        renderArticles(FALLBACK);
+      }
     }
   }
+ 
   loadArticles();
 </script>
-
 </body>
 </html>
